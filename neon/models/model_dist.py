@@ -24,11 +24,16 @@ from neon.util.persist import load_obj, save_obj, load_class
 from neon.util.modeldesc import ModelDescription
 from neon.layers import Sequential, Activation, Tree, SingleOutputTree
 import numpy as np
+import neon
+
+import capnp
+import cap.msg_capnp as msg_capnp
+from cap.cap_helper import *
 
 logger = logging.getLogger(__name__)
 
 
-class Model(NervanaObject):
+class ModelDist(NervanaObject):
     """
     Basic model class which stores a list of layers describing the model. Can train the layer
     weights on a dataset, evaluate on a test set and serialize the mode.
@@ -47,7 +52,7 @@ class Model(NervanaObject):
     """
 
     def __init__(self, layers, dataset=None, weights_only=False, name="model", optimizer=None):
-        super(Model, self).__init__(name)
+        super(ModelDist, self).__init__(name)
         self.optimizer = optimizer
         self.params = None  # should be able to remove
         self.states = None  # should be able to remove
@@ -73,6 +78,10 @@ class Model(NervanaObject):
             else:
                 self.layers = Sequential(layers)
         self.layers.propagate_parallelism("Data")
+
+    # set cap client
+    def set_cap(self, cap):
+        self.cap = cap
 
     @property
     def layers_to_optimize(self):
@@ -116,7 +125,7 @@ class Model(NervanaObject):
         config_string = "Network Layers:\n" + self.layers.nested_str()
         return config_string
 
-    def fit(self, dataset, cost, optimizer, num_epochs, callbacks):
+    def fit_ps(self, dataset, cost, optimizer, num_epochs, callbacks):
         """
         Trains the model parameters on a dataset by minimizing the cost function through
         gradient descent and updates the layer weights according to a learning rule
@@ -142,12 +151,13 @@ class Model(NervanaObject):
         self.initialize(dataset, cost)
 
         callbacks.on_train_begin(num_epochs)
+
         while self.epoch_index < num_epochs and not self.finished:
             self.nbatches = dataset.nbatches
 
             callbacks.on_epoch_begin(self.epoch_index)
 
-            self._epoch_fit(dataset, callbacks)
+            self._epoch_fit_ps(dataset, callbacks)
 
             callbacks.on_epoch_end(self.epoch_index)
 
@@ -155,7 +165,7 @@ class Model(NervanaObject):
 
         callbacks.on_train_end()
 
-    def _epoch_fit(self, dataset, callbacks):
+    def _epoch_fit_ps(self, dataset, callbacks):
         """
         Helper function for fit which performs training on a dataset for one epoch.
 
@@ -165,29 +175,49 @@ class Model(NervanaObject):
         epoch = self.epoch_index
         self.total_cost[:] = 0
         # iterate through minibatches of the dataset
-        for mb_idx, (x, t) in enumerate(dataset):
+        for mb_idx in range(dataset.nbatches):
             callbacks.on_minibatch_begin(epoch, mb_idx)
             self.be.begin(Block.minibatch, mb_idx)
 
-            x = self.fprop(x)
-
-            self.total_cost[:] = self.total_cost + self.cost.get_cost(x, t)
+            #x = self.fprop(x)
+            #self.total_cost[:] = self.total_cost + self.cost.get_cost(x, t)
 
             # deltas back propagate through layers
             # for every layer in reverse except the 0th one
-            delta = self.cost.get_errors(x, t)
+            #delta = self.cost.get_errors(x, t)
+            #self.bprop(delta)
+            
+            # get variables
+            var_array = self.get_variables()
+            var_cap = array_to_cap(var_array)
+            print type(var_cap)
 
-            self.bprop(delta)
+            # send out variables
+            promise = self.cap.runStep(ins=var_cap)
+
+            # get back gradients
+            ans = promise.wait()
+            print cap_to_array(ans.outs)
             
             self.optimizer.optimize(self.layers_to_optimize, epoch=epoch)
 
-            self.be.end(Block.minibatch, mb_idx)
+            #self.be.end(Block.minibatch, mb_idx)
             callbacks.on_minibatch_end(epoch, mb_idx)
+
+            break
 
         # now we divide total cost by the number of batches,
         # so it was never total cost, but sum of averages
         # across all the minibatches we trained on
         self.total_cost[:] = self.total_cost / dataset.nbatches
+
+    def get_variables(self):
+        var_array = []
+        for l in self.layers.layers:
+            if isinstance(l, neon.layers.layer.ParameterLayer):
+                var_array.append((l.name+'_W', l.get_params()[0][0]._tensor))
+                #var_array.append((l.name+'_g', l.get_params()[0][1]._tensor))
+        return var_array
 
     def fprop(self, x, inference=False):
         """

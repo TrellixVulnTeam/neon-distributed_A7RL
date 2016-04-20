@@ -13,3 +13,4 @@
 # limitations under the License.
 # ----------------------------------------------------------------------------
 from neon.models.model import Model
+from neon.models.model_dist import ModelDist

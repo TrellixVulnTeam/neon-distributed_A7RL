@@ -43,11 +43,15 @@ from neon.callbacks.callbacks import Callbacks
 from neon.data import ArrayIterator, load_mnist
 from neon.initializers import Gaussian
 from neon.layers import GeneralizedCost, Affine
-from neon.models import Model
+from neon.models import ModelDist
 from neon.optimizers import GradientDescentMomentum
 from neon.transforms import Rectlin, Logistic, CrossEntropyBinary, Misclassification
 from neon.util.argparser import NeonArgparser
 
+from neon.initializers.initializer import Uniform
+
+import capnp
+from cap.cap_helper import *
 
 # parse the command line arguments
 parser = NeonArgparser(__doc__)
@@ -70,8 +74,8 @@ valid_set = ArrayIterator(X_test, y_test, nclass=nclass, lshape=(1, 28, 28))
 init_norm = Gaussian(loc=0.0, scale=0.01)
 
 # setup model layers
-layers = [Affine(nout=100, init=init_norm, activation=Rectlin()),
-          Affine(nout=10, init=init_norm, activation=Logistic(shortcut=True))]
+layers = [Affine(nout=100, init=init_norm, bias=Uniform(), activation=Rectlin()),
+          Affine(nout=10, init=init_norm, bias=Uniform(), activation=Logistic(shortcut=True))]
 
 # setup cost function as CrossEntropy
 cost = GeneralizedCost(costfunc=CrossEntropyBinary())
@@ -80,11 +84,16 @@ cost = GeneralizedCost(costfunc=CrossEntropyBinary())
 optimizer = GradientDescentMomentum(0.1, momentum_coef=0.9, stochastic_round=args.rounding)
 
 # initialize model object
-mlp = Model(layers=layers)
+mlp = ModelDist(layers=layers)
 
 # configure callbacks
 callbacks = Callbacks(mlp, eval_set=valid_set, **args.callback_args)
 
+# run rpc client
+client = capnp.TwoPartyClient('localhost:60000')
+cap = client.bootstrap().cast_as(msg_capnp.Worker)
+mlp.set_cap(cap)
+
 # run fit
-mlp.fit(train_set, optimizer=optimizer, num_epochs=args.epochs, cost=cost, callbacks=callbacks)
+mlp.fit_ps(train_set, optimizer=optimizer, num_epochs=args.epochs, cost=cost, callbacks=callbacks)
 print('Misclassification error = %.1f%%' % (mlp.eval(valid_set, metric=Misclassification())*100))
