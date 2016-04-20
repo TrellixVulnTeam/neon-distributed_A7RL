@@ -30,6 +30,8 @@ import capnp
 import cap.msg_capnp as msg_capnp
 from cap.cap_helper import *
 
+import threading
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,6 +84,11 @@ class ModelDist(NervanaObject):
     # set cap client
     def set_cap(self, cap):
         self.cap = cap
+
+    # set synchronization event
+    def set_sync_event(event_recv, event_send):
+        self.event_recv = event_recv
+        self.event_send = event_send
 
     @property
     def layers_to_optimize(self):
@@ -188,7 +195,7 @@ class ModelDist(NervanaObject):
             #self.bprop(delta)
             
             # get variables
-            var_array = self.get_variables()
+            var_array = self.get_vars()
             var_cap = array_to_cap(var_array)
             print type(var_cap)
 
@@ -199,6 +206,7 @@ class ModelDist(NervanaObject):
             ans = promise.wait()
             print cap_to_array(ans.outs)
             
+            self.load_grads()
             self.optimizer.optimize(self.layers_to_optimize, epoch=epoch)
 
             #self.be.end(Block.minibatch, mb_idx)
@@ -211,13 +219,115 @@ class ModelDist(NervanaObject):
         # across all the minibatches we trained on
         self.total_cost[:] = self.total_cost / dataset.nbatches
 
-    def get_variables(self):
-        var_array = []
+    def fit_worker(self, dataset, cost, optimizer, num_epochs, callbacks):
+        """
+        Trains the model parameters on a dataset by minimizing the cost function through
+        gradient descent and updates the layer weights according to a learning rule
+        defined in optimizer.
+
+        Arguments:
+            dataset (iterator): An iterable of minibatches where each
+                element is a (x, y) tuple where x is the input data and y are the labels.
+                x is of dimension (feature_size, batch_size)
+                y is of dimension (label_size, batch_size)
+                Length of the iterator is num_batches which is num_data / batch_size
+            cost (Cost): Defines the function which the model is minimizing based
+                on the output of the last layer and the input labels
+            optimizer (Optimizer): Defines the learning rule for updating the model parameters
+            num_epochs: Number of times to iterate over the dataset.
+            callbacks (Callbacks): Defines callbacks to run at the end of each mini-batch / epoch.
+        """
+        self.nbatches = dataset.nbatches
+        self.ndata = dataset.ndata
+        # self.set_shortcut()  # infer if bprop shortcut can be used
+        self.total_cost = self.be.empty((1, 1), dtype=np.float32)
+        self.optimizer = optimizer
+        self.initialize(dataset, cost)
+
+        callbacks.on_train_begin(num_epochs)
+        while self.epoch_index < num_epochs and not self.finished:
+            self.nbatches = dataset.nbatches
+
+            callbacks.on_epoch_begin(self.epoch_index)
+
+            self._epoch_fit_worker(dataset, callbacks)
+
+            callbacks.on_epoch_end(self.epoch_index)
+
+            self.epoch_index += 1
+
+        callbacks.on_train_end()
+
+    def _epoch_fit_worker(self, dataset, callbacks):
+        """
+        Helper function for fit which performs training on a dataset for one epoch.
+
+        Arguments:
+            dataset (iterable): Dataset iterator to perform fit on
+        """
+        epoch = self.epoch_index
+        self.total_cost[:] = 0
+        # iterate through minibatches of the dataset
+        for mb_idx, (x, t) in enumerate(dataset):
+            callbacks.on_minibatch_begin(epoch, mb_idx)
+            self.be.begin(Block.minibatch, mb_idx)
+
+            # block until receive variables
+            event_recv.wait() # unblock by rpc runStep
+            event_recv.clear()
+            
+            x = self.fprop(x)
+
+            self.total_cost[:] = self.total_cost + self.cost.get_cost(x, t)
+
+            # deltas back propagate through layers
+            # for every layer in reverse except the 0th one
+            delta = self.cost.get_errors(x, t)
+
+            self.bprop(delta)
+            
+            # send out gradients
+            event_send.set()
+
+            #self.optimizer.optimize(self.layers_to_optimize, epoch=epoch)
+
+            self.be.end(Block.minibatch, mb_idx)
+            callbacks.on_minibatch_end(epoch, mb_idx)
+
+        # now we divide total cost by the number of batches,
+        # so it was never total cost, but sum of averages
+        # across all the minibatches we trained on
+        self.total_cost[:] = self.total_cost / dataset.nbatches
+
+    # TODO: use 'self.layers_to_optimize'
+    # return variables as [(name, np.array), ]
+    def get_vars(self):
+        array = []
         for l in self.layers.layers:
             if isinstance(l, neon.layers.layer.ParameterLayer):
-                var_array.append((l.name+'_W', l.get_params()[0][0]._tensor))
-                #var_array.append((l.name+'_g', l.get_params()[0][1]._tensor))
-        return var_array
+                array.append((l.name+'_W', l.get_params()[0][0]._tensor))
+                #array.append((l.name+'_g', l.get_params()[0][1]._tensor))
+        return array
+
+    # return gradients as [(name, np.array), ]
+    def get_grads(self):
+        array = []
+        for l in self.layers.layers:
+            if isinstance(l, neon.layers.layer.ParameterLayer):
+                #array.append((l.name+'_W', l.get_params()[0][0]._tensor))
+                array.append((l.name+'_g', l.get_params()[0][1]._tensor))
+        return array
+
+    def load_vars(array):
+        for l, k_v in zip(self.layers.layers, array):
+            if isinstance(l, neon.layers.layer.ParameterLayer):
+                l.get_params()[0][0]._tensor = k_v[1]
+
+    def load_grads(array):
+        for l, k_v in zip(self.layers.layers, array):
+            if isinstance(l, neon.layers.layer.ParameterLayer):
+                l.get_params()[0][1]._tensor = k_v[1]
+
 
     def fprop(self, x, inference=False):
         """
