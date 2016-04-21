@@ -37,63 +37,24 @@ Examples:
         checkpoint file named checkpoint.pkl.
 """
 
-import logging
-
-from neon.callbacks.callbacks import Callbacks
-from neon.data import ArrayIterator, load_mnist
-from neon.initializers import Gaussian
-from neon.layers import GeneralizedCost, Affine
-from neon.models import ModelDist
-from neon.optimizers import GradientDescentMomentum
-from neon.transforms import Rectlin, Logistic, CrossEntropyBinary, Misclassification
-from neon.util.argparser import NeonArgparser
-
-from neon.initializers.initializer import Uniform
-
 import capnp
 from cap.cap_helper import *
+#from model_mnist import ModelMnist
+from cifar10_allcnn import ModelCifar10AllCNN
 
-# parse the command line arguments
-parser = NeonArgparser(__doc__)
-
-args = parser.parse_args()
-
-logger = logging.getLogger()
-logger.setLevel(args.log_thresh)
-
-# load up the mnist data set
-# split into train and tests sets
-(X_train, y_train), (X_test, y_test), nclass = load_mnist(path=args.data_dir)
-
-# setup a training set iterator
-train_set = ArrayIterator(X_train, y_train, nclass=nclass, lshape=(1, 28, 28))
-# setup a validation data set iterator
-valid_set = ArrayIterator(X_test, y_test, nclass=nclass, lshape=(1, 28, 28))
-
-# setup weight initialization function
-init_norm = Gaussian(loc=0.0, scale=0.01)
-
-# setup model layers
-layers = [Affine(nout=100, init=init_norm, bias=Uniform(), activation=Rectlin()),
-          Affine(nout=10, init=init_norm, bias=Uniform(), activation=Logistic(shortcut=True))]
-
-# setup cost function as CrossEntropy
-cost = GeneralizedCost(costfunc=CrossEntropyBinary())
-
-# setup optimizer
-optimizer = GradientDescentMomentum(0.1, momentum_coef=0.9, stochastic_round=args.rounding)
-
-# initialize model object
-mlp = ModelDist(layers=layers)
-
-# configure callbacks
-callbacks = Callbacks(mlp, eval_set=valid_set, **args.callback_args)
+# build model
+#model = ModelMnist()
+model = ModelCifar10AllCNN()
+model.load_data()
+model.build_model()
 
 # run rpc client
 client = capnp.TwoPartyClient('localhost:60000')
 cap = client.bootstrap().cast_as(msg_capnp.Worker)
-mlp.set_cap(cap)
+model.model.set_cap(cap)
 
 # run fit
-mlp.fit_ps(train_set, optimizer=optimizer, num_epochs=args.epochs, cost=cost, callbacks=callbacks)
-print('Misclassification error = %.1f%%' % (mlp.eval(valid_set, metric=Misclassification())*100))
+promise = cap.loadData(info=range_to_cap((1, 10)))
+print promise.wait()
+model.fit_ps()
+model.eval()

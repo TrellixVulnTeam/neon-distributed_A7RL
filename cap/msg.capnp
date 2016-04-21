@@ -21,4 +21,5 @@ struct Msg {
 interface Worker {
   loadData @0 (info: DataInfo) -> (msg: Msg);
   runStep  @1 (ins: TensorArray) -> (outs: TensorArray);
+  endRun @2() -> (msg: Msg);
 }

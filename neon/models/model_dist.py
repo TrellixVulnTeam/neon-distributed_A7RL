@@ -86,9 +86,10 @@ class ModelDist(NervanaObject):
         self.cap = cap
 
     # set synchronization event
-    def set_sync_event(event_recv, event_send):
+    def set_sync_event(self, event_recv, event_send, event_init):
         self.event_recv = event_recv
         self.event_send = event_send
+        self.event_init = event_init
 
     @property
     def layers_to_optimize(self):
@@ -133,23 +134,6 @@ class ModelDist(NervanaObject):
         return config_string
 
     def fit_ps(self, dataset, cost, optimizer, num_epochs, callbacks):
-        """
-        Trains the model parameters on a dataset by minimizing the cost function through
-        gradient descent and updates the layer weights according to a learning rule
-        defined in optimizer.
-
-        Arguments:
-            dataset (iterator): An iterable of minibatches where each
-                element is a (x, y) tuple where x is the input data and y are the labels.
-                x is of dimension (feature_size, batch_size)
-                y is of dimension (label_size, batch_size)
-                Length of the iterator is num_batches which is num_data / batch_size
-            cost (Cost): Defines the function which the model is minimizing based
-                on the output of the last layer and the input labels
-            optimizer (Optimizer): Defines the learning rule for updating the model parameters
-            num_epochs: Number of times to iterate over the dataset.
-            callbacks (Callbacks): Defines callbacks to run at the end of each mini-batch / epoch.
-        """
         self.nbatches = dataset.nbatches
         self.ndata = dataset.ndata
         # self.set_shortcut()  # infer if bprop shortcut can be used
@@ -157,33 +141,27 @@ class ModelDist(NervanaObject):
         self.optimizer = optimizer
         self.initialize(dataset, cost)
 
-        callbacks.on_train_begin(num_epochs)
+        #callbacks.on_train_begin(num_epochs)
 
         while self.epoch_index < num_epochs and not self.finished:
             self.nbatches = dataset.nbatches
 
-            callbacks.on_epoch_begin(self.epoch_index)
+            #callbacks.on_epoch_begin(self.epoch_index)
 
             self._epoch_fit_ps(dataset, callbacks)
 
-            callbacks.on_epoch_end(self.epoch_index)
+            #callbacks.on_epoch_end(self.epoch_index)
 
             self.epoch_index += 1
 
-        callbacks.on_train_end()
+        #callbacks.on_train_end()
 
     def _epoch_fit_ps(self, dataset, callbacks):
-        """
-        Helper function for fit which performs training on a dataset for one epoch.
-
-        Arguments:
-            dataset (iterable): Dataset iterator to perform fit on
-        """
         epoch = self.epoch_index
         self.total_cost[:] = 0
         # iterate through minibatches of the dataset
         for mb_idx in range(dataset.nbatches):
-            callbacks.on_minibatch_begin(epoch, mb_idx)
+            #callbacks.on_minibatch_begin(epoch, mb_idx)
             self.be.begin(Block.minibatch, mb_idx)
 
             #x = self.fprop(x)
@@ -197,22 +175,22 @@ class ModelDist(NervanaObject):
             # get variables
             var_array = self.get_vars()
             var_cap = array_to_cap(var_array)
-            print type(var_cap)
 
             # send out variables
             promise = self.cap.runStep(ins=var_cap)
 
             # get back gradients
             ans = promise.wait()
-            print cap_to_array(ans.outs)
+            grads = cap_to_array(ans.outs)
             
-            self.load_grads()
+            self.load_grads(grads)
             self.optimizer.optimize(self.layers_to_optimize, epoch=epoch)
 
-            #self.be.end(Block.minibatch, mb_idx)
-            callbacks.on_minibatch_end(epoch, mb_idx)
+            self.be.end(Block.minibatch, mb_idx)
+            # TODO: do not know why index alway overflow here
+            #callbacks.on_minibatch_end(epoch, mb_idx)
 
-            break
+            #break
 
         # now we divide total cost by the number of batches,
         # so it was never total cost, but sum of averages
@@ -220,23 +198,6 @@ class ModelDist(NervanaObject):
         self.total_cost[:] = self.total_cost / dataset.nbatches
 
     def fit_worker(self, dataset, cost, optimizer, num_epochs, callbacks):
-        """
-        Trains the model parameters on a dataset by minimizing the cost function through
-        gradient descent and updates the layer weights according to a learning rule
-        defined in optimizer.
-
-        Arguments:
-            dataset (iterator): An iterable of minibatches where each
-                element is a (x, y) tuple where x is the input data and y are the labels.
-                x is of dimension (feature_size, batch_size)
-                y is of dimension (label_size, batch_size)
-                Length of the iterator is num_batches which is num_data / batch_size
-            cost (Cost): Defines the function which the model is minimizing based
-                on the output of the last layer and the input labels
-            optimizer (Optimizer): Defines the learning rule for updating the model parameters
-            num_epochs: Number of times to iterate over the dataset.
-            callbacks (Callbacks): Defines callbacks to run at the end of each mini-batch / epoch.
-        """
         self.nbatches = dataset.nbatches
         self.ndata = dataset.ndata
         # self.set_shortcut()  # infer if bprop shortcut can be used
@@ -244,37 +205,35 @@ class ModelDist(NervanaObject):
         self.optimizer = optimizer
         self.initialize(dataset, cost)
 
-        callbacks.on_train_begin(num_epochs)
+        self.event_init.set()
+
+        #callbacks.on_train_begin(num_epochs)
         while self.epoch_index < num_epochs and not self.finished:
             self.nbatches = dataset.nbatches
 
-            callbacks.on_epoch_begin(self.epoch_index)
+            #callbacks.on_epoch_begin(self.epoch_index)
 
             self._epoch_fit_worker(dataset, callbacks)
 
-            callbacks.on_epoch_end(self.epoch_index)
+            #callbacks.on_epoch_end(self.epoch_index)
 
             self.epoch_index += 1
 
-        callbacks.on_train_end()
+        #callbacks.on_train_end()
 
     def _epoch_fit_worker(self, dataset, callbacks):
-        """
-        Helper function for fit which performs training on a dataset for one epoch.
-
-        Arguments:
-            dataset (iterable): Dataset iterator to perform fit on
-        """
         epoch = self.epoch_index
         self.total_cost[:] = 0
         # iterate through minibatches of the dataset
         for mb_idx, (x, t) in enumerate(dataset):
-            callbacks.on_minibatch_begin(epoch, mb_idx)
+            #callbacks.on_minibatch_begin(epoch, mb_idx)
             self.be.begin(Block.minibatch, mb_idx)
-
+            
             # block until receive variables
-            event_recv.wait() # unblock by rpc runStep
-            event_recv.clear()
+            print 'wait on vars'
+            
+            self.event_recv.wait() # unblock by rpc runStep
+            self.event_recv.clear()
             
             x = self.fprop(x)
 
@@ -283,50 +242,78 @@ class ModelDist(NervanaObject):
             # deltas back propagate through layers
             # for every layer in reverse except the 0th one
             delta = self.cost.get_errors(x, t)
+            print self.cost.cost.get()
 
             self.bprop(delta)
-            
+            print 'bprop done'
+
             # send out gradients
-            event_send.set()
+            self.event_send.set()
 
             #self.optimizer.optimize(self.layers_to_optimize, epoch=epoch)
 
             self.be.end(Block.minibatch, mb_idx)
-            callbacks.on_minibatch_end(epoch, mb_idx)
+            #callbacks.on_minibatch_end(epoch, mb_idx)
+
+            #break
 
         # now we divide total cost by the number of batches,
         # so it was never total cost, but sum of averages
         # across all the minibatches we trained on
         self.total_cost[:] = self.total_cost / dataset.nbatches
 
-    # TODO: use 'self.layers_to_optimize'
+    # initialize the model after building
+    def init2(self, dataset, cost, optimizer):
+        self.nbatches = dataset.nbatches
+        self.ndata = dataset.ndata
+        self.total_cost = self.be.empty((1, 1), dtype=np.float32)
+        self.optimizer = optimizer
+        self.initialize(dataset, cost)
+
+    # remember to reset 'total_cost' at the end of epoch
+
+    # compute gradients
+    # input: x:data, t:label
+    # TODO: yield gradient layer by layer
+    def compute_grads(self, x, t):
+        # forward prop
+        x = self.fprop(x)
+        # update total cost
+        self.total_cost[:] = self.total_cost + self.cost.get_cost(x, t)
+        # deltas back propagate through layers
+        # for every layer in reverse except the 0th one
+        delta = self.cost.get_errors(x, t)
+        # back prop
+        self.bprop(delta)
+        return self.get_grads()
+
+    # apply gradients to variables
+    # TODO: remove 'load_grad', directly use 'grad_array' in 'optimize'
+    def apply_grads(self, grad_array):
+        self.load_grads(grads)
+        self.optimizer.optimize(self.layers_to_optimize, epoch=epoch)
+
     # return variables as [(name, np.array), ]
     def get_vars(self):
         array = []
-        for l in self.layers.layers:
-            if isinstance(l, neon.layers.layer.ParameterLayer):
-                array.append((l.name+'_W', l.get_params()[0][0]._tensor))
-                #array.append((l.name+'_g', l.get_params()[0][1]._tensor))
+        for l in self.layers_to_optimize:
+            array.append((l.name+'_W', l.get_params()[0][0]._tensor))
         return array
 
     # return gradients as [(name, np.array), ]
     def get_grads(self):
         array = []
-        for l in self.layers.layers:
-            if isinstance(l, neon.layers.layer.ParameterLayer):
-                #array.append((l.name+'_W', l.get_params()[0][0]._tensor))
-                array.append((l.name+'_g', l.get_params()[0][1]._tensor))
+        for l in self.layers_to_optimize:
+            array.append((l.name+'_g', l.get_params()[0][1]._tensor))
         return array
 
-    def load_vars(array):
-        for l, k_v in zip(self.layers.layers, array):
-            if isinstance(l, neon.layers.layer.ParameterLayer):
-                l.get_params()[0][0]._tensor = k_v[1]
+    def load_vars(self, array):
+        for l, k_v in zip(self.layers_to_optimize, array):
+            l.get_params()[0][0]._tensor = k_v[1]
 
-    def load_grads(array):
-        for l, k_v in zip(self.layers.layers, array):
-            if isinstance(l, neon.layers.layer.ParameterLayer):
-                l.get_params()[0][1]._tensor = k_v[1]
+    def load_grads(self, array):
+        for l, k_v in zip(self.layers_to_optimize, array):
+            l.get_params()[0][1]._tensor = k_v[1]
 
 
     def fprop(self, x, inference=False):

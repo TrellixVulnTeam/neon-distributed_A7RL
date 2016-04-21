@@ -36,24 +36,12 @@ Examples:
         Before starting to train the model, the model state is set to the values stored in the
         checkpoint file named checkpoint.pkl.
 """
-
-import logging
-
-from neon.callbacks.callbacks import Callbacks
-from neon.data import ArrayIterator, load_mnist
-from neon.initializers import Gaussian
-from neon.layers import GeneralizedCost, Affine
-from neon.models import ModelDist
-from neon.optimizers import GradientDescentMomentum
-from neon.transforms import Rectlin, Logistic, CrossEntropyBinary, Misclassification
-from neon.util.argparser import NeonArgparser
-
-from neon.initializers.initializer import Uniform
-
 import capnp
 from cap.cap_helper import *
 
 import threading
+#from model_mnist import ModelMnist
+from cifar10_allcnn import ModelCifar10AllCNN
 
 #======================= RPC server Class Def ===========================
 class WorkerImpl(msg_capnp.Worker.Server):
@@ -63,18 +51,30 @@ class WorkerImpl(msg_capnp.Worker.Server):
     self.MINIBATCH_SIZE = 100
 
     self.model = model
+    self.model.build_model()
+    
     self.event_recv = threading.Event()
     self.event_send = threading.Event()
-    self.model.set_sync_event(self.event_recv, self.event_send)
+    self.event_load_data = threading.Event()
+    self.event_init = threading.Event()
+    self.model.model.set_sync_event(self.event_recv, 
+                                    self.event_send,
+                                    self.event_init)
 
-  def run_model():
-    self.model.fit()
+  def run_model(self):
+    print 'wait for loading data'
+    self.event_load_data.wait()
+    self.model.fit_worker()
 
+  # cap
   def loadData(self, info, **kwargs):
+    print info.start, info.end
     self.model.load_data()
     #self.model.load_data(info.start, info.end)
-    return msg_to_cap("done")
+    self.event_load_data.set()
+    return msg_to_cap("load done")
 
+  # cap
   def runStep(self, ins, **kwargs):
     print "%f: Run %d start" % (time.time(), self.iter_nr)
 
@@ -87,12 +87,12 @@ class WorkerImpl(msg_capnp.Worker.Server):
     print "time cap_to_array: %f" % d_t    
 
     # load variables
+    self.event_init.wait()
     self.model.model.load_vars(var_array)
 
     # vars received, continue fit
-    self.event_recv.set()
-
-    print accuracy
+    self.model.model.event_recv.set()
+    
     self.iter_nr += 1
     
     # block here, wait for grads to be ready
@@ -106,63 +106,26 @@ class WorkerImpl(msg_capnp.Worker.Server):
 
     return array_to_cap(grad_array)
 
-
-#==================== build model ======================
-class ModelMnist():
-    def __init__():
-        # parse the command line arguments
-        parser = NeonArgparser(__doc__)
-
-        self.args = parser.parse_args()
-
-        self.logger = logging.getLogger()
-        self.logger.setLevel(self.args.log_thresh)
-
-    def load_data():
-        # load up the mnist data set
-        # split into train and tests sets
-        (X_train, y_train), (X_test, y_test), nclass = load_mnist(path=args.data_dir)
-
-        # setup a training set iterator
-        self.train_set = ArrayIterator(X_train, y_train, nclass=nclass, lshape=(1, 28, 28))
-        # setup a validation data set iterator
-        self.valid_set = ArrayIterator(X_test, y_test, nclass=nclass, lshape=(1, 28, 28))
-
-
-    def build_model():
-        # setup weight initialization function
-        init_norm = Gaussian(loc=0.0, scale=0.01)
-
-        # setup model layers
-        layers = [Affine(nout=100, init=init_norm, bias=Uniform(), activation=Rectlin()),
-                  Affine(nout=10, init=init_norm, bias=Uniform(), activation=Logistic(shortcut=True))]
-
-        # setup cost function as CrossEntropy
-        self.cost = GeneralizedCost(costfunc=CrossEntropyBinary())
-
-        # setup optimizer
-        self.optimizer = GradientDescentMomentum(0.1, momentum_coef=0.9, stochastic_round=args.rounding)
-
-        # initialize model object
-        self.model = ModelDist(layers=layers)
-
-        # configure callbacks
-        self.callbacks = Callbacks(self.model, eval_set=self.valid_set, **self.args.callback_args)
-
-    def fit():
-        # run fit: run inside until finishing
-        self.model.fit_worker(self.train_set, optimizer=self.optimizer, 
-                              num_epochs=self.args.epochs, cost=self.cost, callbacks=self.callbacks)
-        #print('Misclassification error = %.1f%%' % (mlp.eval(valid_set, metric=Misclassification())*100))
+  def endRun(self, **kwargs):
+    print 'run ends'
+    return msg_to_cap("end done")
 
 
 # build model
-model = ModelMnist()
+#model = ModelMnist()
+model = ModelCifar10AllCNN()
 
 # run rpc client
 worker = WorkerImpl(model)
 server = capnp.TwoPartyServer('*:60000', bootstrap=worker)
-print "Worker is ready"
 
-worker.run_model()
+def worker_thread_fn(server):
+  print 'Worker is ready'
+  worker.run_model()
+
+thread = threading.Thread(target=worker_thread_fn, args=[worker])
+thread.start()
+
+print 'Server is running'
 server.run_forever()
+thread.join()
