@@ -101,8 +101,9 @@ class ModelCifar10AllCNN():
         """
         
     def fit_worker(self):
-        #self.model.fit_worker(self.train_set, optimizer=self.opt_gdm, num_epochs=self.num_epochs, 
-        #                      cost=self.cost, callbacks=None)
+        self.model.fit_worker(self.train_set, optimizer=self.opt_gdm, num_epochs=self.num_epochs, 
+                              cost=self.cost, callbacks=None)
+        """
         self.model.init2(self.train_set, self.cost, self.opt_gdm)
         self.model.event_init.set()
         #callbacks.on_train_begin(num_epochs)
@@ -126,7 +127,8 @@ class ModelCifar10AllCNN():
                 # done
                 print 'batch done'
 
-            epoch_index += 1        
+            epoch_index += 1
+        """
         
 
     def fit_ps(self):

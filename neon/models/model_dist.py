@@ -31,6 +31,7 @@ import cap.msg_capnp as msg_capnp
 from cap.cap_helper import *
 
 import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +82,10 @@ class ModelDist(NervanaObject):
                 self.layers = Sequential(layers)
         self.layers.propagate_parallelism("Data")
 
-    # set cap client
-    def set_cap(self, cap):
-        self.cap = cap
+    # set worker list
+    def set_worker(self, worker_list, reducer):
+        self.worker_list = worker_list
+        self.reducer = reducer
 
     # set synchronization event
     def set_sync_event(self, event_recv, event_send, event_init):
@@ -133,64 +135,57 @@ class ModelDist(NervanaObject):
         config_string = "Network Layers:\n" + self.layers.nested_str()
         return config_string
 
+    def set_nbatches(self, nbatches):
+        self.nbatches_dist = nbatches
+
     def fit_ps(self, dataset, cost, optimizer, num_epochs, callbacks):
         self.nbatches = dataset.nbatches
         self.ndata = dataset.ndata
-        # self.set_shortcut()  # infer if bprop shortcut can be used
         self.total_cost = self.be.empty((1, 1), dtype=np.float32)
         self.optimizer = optimizer
         self.initialize(dataset, cost)
 
-        #callbacks.on_train_begin(num_epochs)
-
         while self.epoch_index < num_epochs and not self.finished:
             self.nbatches = dataset.nbatches
-
-            #callbacks.on_epoch_begin(self.epoch_index)
-
             self._epoch_fit_ps(dataset, callbacks)
-
-            #callbacks.on_epoch_end(self.epoch_index)
-
             self.epoch_index += 1
 
-        #callbacks.on_train_end()
-
+        print '%f: PS end' % time.time()
+    
     def _epoch_fit_ps(self, dataset, callbacks):
         epoch = self.epoch_index
         self.total_cost[:] = 0
         # iterate through minibatches of the dataset
-        for mb_idx in range(dataset.nbatches):
-            #callbacks.on_minibatch_begin(epoch, mb_idx)
+        for mb_idx in range(self.nbatches_dist):
+            print mb_idx, self.nbatches_dist
             self.be.begin(Block.minibatch, mb_idx)
-
-            #x = self.fprop(x)
-            #self.total_cost[:] = self.total_cost + self.cost.get_cost(x, t)
-
-            # deltas back propagate through layers
-            # for every layer in reverse except the 0th one
-            #delta = self.cost.get_errors(x, t)
-            #self.bprop(delta)
             
             # get variables
+            print '%f: PS start Batch' % time.time()
             var_array = self.get_vars()
             var_cap = array_to_cap(var_array)
-
-            # send out variables
-            promise = self.cap.runStep(ins=var_cap)
-
-            # get back gradients
-            ans = promise.wait()
-            grads = cap_to_array(ans.outs)
             
-            self.load_grads(grads)
+            # send out variables
+            print '%f: PS Send Vars' % time.time()
+            promises = []
+            for worker in self.worker_list:
+                promises.append(worker.run_step_sync(var_cap))
+
+            for p in promises:
+                # NOTE: reduce inside callback
+                p.wait()
+                #self.reducer.reduce( cap_to_array(result.outs) )
+            
+            # get back gradients
+            print '%f: PS Receive Grads' % time.time()
+            
+            self.load_grads(self.reducer.result())
+            print '%f: PS Load Grads' % time.time()
+            
             self.optimizer.optimize(self.layers_to_optimize, epoch=epoch)
+            print '%f: PS Optimized' % time.time()
 
             self.be.end(Block.minibatch, mb_idx)
-            # TODO: do not know why index alway overflow here
-            #callbacks.on_minibatch_end(epoch, mb_idx)
-
-            #break
 
         # now we divide total cost by the number of batches,
         # so it was never total cost, but sum of averages
@@ -206,36 +201,28 @@ class ModelDist(NervanaObject):
         self.initialize(dataset, cost)
 
         self.event_init.set()
-
-        #callbacks.on_train_begin(num_epochs)
+        
         while self.epoch_index < num_epochs and not self.finished:
             self.nbatches = dataset.nbatches
 
-            #callbacks.on_epoch_begin(self.epoch_index)
-
             self._epoch_fit_worker(dataset, callbacks)
 
-            #callbacks.on_epoch_end(self.epoch_index)
-
             self.epoch_index += 1
-
-        #callbacks.on_train_end()
 
     def _epoch_fit_worker(self, dataset, callbacks):
         epoch = self.epoch_index
         self.total_cost[:] = 0
         # iterate through minibatches of the dataset
         for mb_idx, (x, t) in enumerate(dataset):
-            #callbacks.on_minibatch_begin(epoch, mb_idx)
             self.be.begin(Block.minibatch, mb_idx)
             
             # block until receive variables
-            print 'wait on vars'
             
             self.event_recv.wait() # unblock by rpc runStep
             self.event_recv.clear()
             
             x = self.fprop(x)
+            print '%f: Fprop done' % time.time()
 
             self.total_cost[:] = self.total_cost + self.cost.get_cost(x, t)
 
@@ -245,17 +232,12 @@ class ModelDist(NervanaObject):
             print self.cost.cost.get()
 
             self.bprop(delta)
-            print 'bprop done'
-
+            print '%f: Bprop done' % time.time()
+            
             # send out gradients
             self.event_send.set()
-
-            #self.optimizer.optimize(self.layers_to_optimize, epoch=epoch)
-
+            
             self.be.end(Block.minibatch, mb_idx)
-            #callbacks.on_minibatch_end(epoch, mb_idx)
-
-            #break
 
         # now we divide total cost by the number of batches,
         # so it was never total cost, but sum of averages

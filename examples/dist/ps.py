@@ -1,60 +1,136 @@
 #!/usr/bin/env python
-# ----------------------------------------------------------------------------
-# Copyright 2015 Nervana Systems Inc.
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ----------------------------------------------------------------------------
-"""
-Example that trains a small multi-layer perceptron with fully connected layers on MNIST.
-
-This example has some command line arguments that enable different neon features.
-
-Examples:
-
-    python mnist_mlp.py -b gpu -e 10
-        Run the example for 10 epochs of mnist data using the nervana gpu backend
-
-    python mnist_mlp.py --eval_freq 1
-        After each training epoch the validation/test data set will be processed through the model
-        and the cost will be displayed.
-
-    python mnist_mlp.py --serialize 1 -s checkpoint.pkl
-        After every iteration of training the model will be dumped to a pickle file named
-        "checkpoint.pkl".  Changing the serialize parameter changes the frequency at which the
-        model is saved.
-
-    python mnist_mlp.py --model_file checkpoint.pkl
-        Before starting to train the model, the model state is set to the values stored in the
-        checkpoint file named checkpoint.pkl.
-"""
 
 import capnp
 from cap.cap_helper import *
 #from model_mnist import ModelMnist
 from cifar10_allcnn import ModelCifar10AllCNN
 
+import math
+import threading
+
+class ReduceGrads:
+    def __init__(self, total_worker):
+        self.grad_array = []
+        self.lock = threading.Lock()
+        self.total_worker = total_worker
+        self.done_worker = 0
+
+    def reduce(self, grad_array):
+        self.lock.acquire()
+        if self.done_worker == 0:
+            self.grad_array = grad_array
+        else:
+            i = 0
+            for (k0, v0), (k1, v1) in zip(self.grad_array, grad_array):
+                if k0 != k1:
+                    print "Error: gradient term missmatch!"
+                    exit(1)
+                try:
+                    # check with __iadd__
+                    v0 += v1
+                except np.linalg.LinAlgError:
+                    print "Error: gradient addition"
+                    exit(1)
+
+                self.grad_array[i] = (k0, v0)
+                i += 1
+
+        self.done_worker += 1
+        #print self.grad_array
+        self.lock.release()
+
+    def done(self):
+        return self.done_worker == self.total_worker
+
+    def result(self):
+        if self.done_worker != self.total_worker:
+            print "Error: reducer not done => done %d/total %d" % (reducer.done_worker, 
+                                                                   reducer.total_worker)
+            exit(1)
+        else:
+            self.done_worker = 0
+            return self.grad_array
+
+class WorkerStub:
+    def __init__(self, reducer, data_size, batch_size, name="no", 
+                 host="localhost", port=60000):
+        self.name = name
+        self.host = host
+        self.port = port
+        
+        self.data_size = data_size
+        self.batch_size = batch_size
+        self.reducer = reducer
+        
+    def connect(self):
+        self.client = capnp.TwoPartyClient(('%s:%d'%(self.host, self.port)))
+        self.cap = self.client.bootstrap().cast_as(msg_capnp.Worker)
+
+    def load_data(self, total, id):
+        each_total = self.data_size / total
+        self.start = id * each_total
+        self.end   = self.start + each_total
+        self.id = id
+        
+        return self.cap.loadData(info=range_to_cap((self.start, self.end)))
+        
+    # TODO: use call back 'then'
+    def run_step_sync(self, var_cap):
+        return self.cap.runStep(ins=var_cap).then(worker_callback)
+    
+def worker_callback(result):
+    grad_array = cap_to_array(result.outs)
+    print len(grad_array)
+    reducer.reduce(grad_array)
+    print "%f: %d Grads Recv" % (time.time(), 0)
+
+DATA_SIZE = 300
+
+worker_addr_list = [("localhost", 60000, "Myself")]
+
+DATA_PER_WORKER = DATA_SIZE / len(worker_addr_list)
+MINIBATCH_PER_WORKER = 128
+
+NR_BATCH = int( math.ceil( float(DATA_PER_WORKER) / MINIBATCH_PER_WORKER) )
+
 # build model
 #model = ModelMnist()
 model = ModelCifar10AllCNN()
 model.load_data()
 model.build_model()
+model.model.set_nbatches(NR_BATCH)
 
-# run rpc client
-client = capnp.TwoPartyClient('localhost:60000')
-cap = client.bootstrap().cast_as(msg_capnp.Worker)
-model.model.set_cap(cap)
+# ================== create workers  ================
+worker_list = []
+worker_nr = len(worker_addr_list)
+
+reducer = ReduceGrads(worker_nr)
+
+for worker_addr in worker_addr_list:
+    if len(worker_addr) < 2 or len(worker_addr) > 3:
+        print "Wrong worker address: (host, port, name='NA')"
+        exit(1)
+    if len(worker_addr) == 3:
+        name = worker_addr[2]
+    else:
+        name = worker_addr[3]
+    worker_list.append( WorkerStub(reducer, DATA_SIZE, MINIBATCH_PER_WORKER, name,  
+                                   worker_addr[0], worker_addr[1]) )
+
+for worker in worker_list:
+    worker.connect()
+
+model.model.set_worker(worker_list, reducer)
 
 # run fit
-promise = cap.loadData(info=range_to_cap((1, 10)))
-print promise.wait()
+print "%f: Load data at workers" % time.time()
+promises = []
+for id, worker in enumerate(worker_list):
+    promises.append(worker.load_data(worker_nr, id))
+
+for p in promises:
+    p.wait()
+print "%f: Load data done" % time.time() 
+
 model.fit_ps()
 model.eval()
