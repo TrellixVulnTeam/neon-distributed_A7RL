@@ -90,7 +90,7 @@ def worker_callback(result):
     print "%f: %d Grads Recv" % (time.time(), 0)
 
 
-worker_addr_list = [("localhost", 60000, "Alice")]
+worker_addr_list = [("172.17.0.2", 60000, "Alice")]
 db_server_host = 'choufong.ucsd.edu'
 
 DATA_SIZE = 300

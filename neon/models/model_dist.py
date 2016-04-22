@@ -245,6 +245,9 @@ class ModelDist(NervanaObject):
             # send out gradients
             self.event_send.set()
             
+            # push stats
+            self.db_client.push_data()
+            
             self.be.end(Block.minibatch, mb_idx)
 
         # now we divide total cost by the number of batches,

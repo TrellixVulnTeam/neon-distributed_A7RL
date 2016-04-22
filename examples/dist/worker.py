@@ -90,6 +90,7 @@ class WorkerImpl(msg_capnp.Worker.Server):
     # block here, wait for grads to be ready
     self.event_send.wait();
     self.event_send.clear()
+    
     print "%f: Run done" % time.time()
     self.db_client.commit_cache('grads', 't', epoch, batch)
 
