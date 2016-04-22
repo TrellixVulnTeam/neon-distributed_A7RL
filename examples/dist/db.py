@@ -18,7 +18,7 @@ class DBClient():
 	self.worker_id   = worker_id
         self.measure     = measure
 
-	self.client      = InfluxDBClient('localhost', 8086, 'root', 'root', db_name)
+	self.client      = InfluxDBClient(host, 8086, 'root', 'root', db_name)
 	self.client.create_database(db_name)
 
 	#self.client.switch_database(worker_name)

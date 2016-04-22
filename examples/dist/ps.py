@@ -8,7 +8,10 @@ from cifar10_allcnn import ModelCifar10AllCNN
 import math
 import threading
 
+import os
 import db
+
+os.system('service influxdb start')
 
 class ReduceGrads:
     def __init__(self, total_worker):
@@ -98,12 +101,7 @@ DATA_PER_WORKER = DATA_SIZE / len(worker_addr_list)
 MINIBATCH_PER_WORKER = 128
 NR_BATCH = int( math.ceil( float(DATA_PER_WORKER) / MINIBATCH_PER_WORKER) )
 
-# influx db
-db_server = db.DBServer()
-# make sure influx db server is on
-#db_server.start_service()
-#print 'InfluxDB: server started'
-
+# influx dd
 db_client = db.DBClient(db_server_host, 8086, 'default', 'ps', 999)
 print 'InfluxDB: client connected'
 # clear old data
