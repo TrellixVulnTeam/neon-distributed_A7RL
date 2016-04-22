@@ -7,10 +7,10 @@ import threading, time
 #from model_mnist import ModelMnist
 from cifar10_allcnn import ModelCifar10AllCNN
 
-import os
+#import os
 import db
 
-os.system('service influxdb start')
+#os.system('service influxdb start')
 db_server_host = 'choufong.ucsd.edu'
 
 #======================= RPC server Class Def ===========================
