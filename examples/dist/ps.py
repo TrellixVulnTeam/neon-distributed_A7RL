@@ -94,7 +94,7 @@ def worker_callback(result):
 
 
 worker_addr_list = [("172.17.0.2", 60000, "Alice")]
-db_server_host = 'choufong.ucsd.edu'
+db_server_host = '132.239.95.20'
 
 DATA_SIZE = 300
 DATA_PER_WORKER = DATA_SIZE / len(worker_addr_list)
