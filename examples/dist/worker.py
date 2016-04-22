@@ -11,7 +11,7 @@ from cifar10_allcnn import ModelCifar10AllCNN
 import db
 
 #os.system('service influxdb start')
-db_server_host = 'choufong.ucsd.edu'
+db_server_host = '132.239.95.20'
 
 #======================= RPC server Class Def ===========================
 class WorkerImpl(msg_capnp.Worker.Server):
