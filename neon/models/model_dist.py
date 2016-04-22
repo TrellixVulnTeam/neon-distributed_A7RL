@@ -83,9 +83,10 @@ class ModelDist(NervanaObject):
         self.layers.propagate_parallelism("Data")
 
     # set worker list
-    def set_worker(self, worker_list, reducer):
+    def set_dist(self, worker_list, reducer, db_client):
         self.worker_list = worker_list
-        self.reducer = reducer
+        self.reducer     = reducer
+        self.db_client   = db_client
 
     # set synchronization event
     def set_sync_event(self, event_recv, event_send, event_init):
@@ -162,11 +163,14 @@ class ModelDist(NervanaObject):
             
             # get variables
             print '%f: PS start Batch' % time.time()
+            self.db_client.commit_cache('batch', 's', epoch, mb_idx)
+            
             var_array = self.get_vars()
-            var_cap = array_to_cap(var_array)
+            var_cap = array_to_cap(var_array, epoch, mb_idx)
             
             # send out variables
             print '%f: PS Send Vars' % time.time()
+            self.db_client.commit_cache('vars', 't', epoch, mb_idx)
             promises = []
             for worker in self.worker_list:
                 promises.append(worker.run_step_sync(var_cap))
@@ -178,12 +182,14 @@ class ModelDist(NervanaObject):
             
             # get back gradients
             print '%f: PS Receive Grads' % time.time()
+            self.db_client.commit_cache('grads', 'r', epoch, mb_idx)
             
             self.load_grads(self.reducer.result())
-            print '%f: PS Load Grads' % time.time()
+            #print '%f: PS Load Grads' % time.time()
             
             self.optimizer.optimize(self.layers_to_optimize, epoch=epoch)
             print '%f: PS Optimized' % time.time()
+            self.db_client.commit_cache('batch', 'e', epoch, mb_idx)
 
             self.be.end(Block.minibatch, mb_idx)
 
@@ -223,6 +229,7 @@ class ModelDist(NervanaObject):
             
             x = self.fprop(x)
             print '%f: Fprop done' % time.time()
+            self.db_client.commit_cache('fprop', 'e', epoch, mb_idx)
 
             self.total_cost[:] = self.total_cost + self.cost.get_cost(x, t)
 
@@ -233,7 +240,8 @@ class ModelDist(NervanaObject):
 
             self.bprop(delta)
             print '%f: Bprop done' % time.time()
-            
+            self.db_client.commit_cache('bprop', 'e', epoch, mb_idx)
+
             # send out gradients
             self.event_send.set()
             

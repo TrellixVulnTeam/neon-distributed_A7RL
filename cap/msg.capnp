@@ -7,11 +7,15 @@ struct Tensor {
 
 struct TensorArray {
   array @0: List(Tensor);
+  epoch @1: Int32;
+  batch @2: Int32;
 }
 
-struct DataInfo {
+struct WorkerInfo {
   start @0: Int32;
   end   @1: Int32;
+  name  @2: Text;
+  id    @3: Int32;	
 }
 
 struct Msg {
@@ -19,7 +23,7 @@ struct Msg {
 }
 
 interface Worker {
-  loadData @0 (info: DataInfo) -> (msg: Msg);
+  loadData @0 (info: WorkerInfo) -> (msg: Msg);
   runStep  @1 (ins: TensorArray) -> (outs: TensorArray);
   endRun @2() -> (msg: Msg);
 }

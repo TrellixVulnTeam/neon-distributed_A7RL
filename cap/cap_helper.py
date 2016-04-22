@@ -6,8 +6,11 @@ import msg_capnp
 import msgpack
 import msgpack_numpy as m
 
-def array_to_cap(array):
+def array_to_cap(array, epoch=-1, batch=-1):
   array_cap = msg_capnp.TensorArray.new_message()
+  array_cap.epoch = epoch
+  array_cap.batch = batch
+  
   inner_array_cap = array_cap.init('array', len(array))
   
   for i, (k, v) in enumerate(array):
@@ -23,8 +26,9 @@ def cap_to_array(cap):
                   msgpack.unpackb(tensor_cap.data, object_hook=m.decode)))
   return array
 
-def range_to_cap(r):
-  return msg_capnp.DataInfo.new_message(start=r[0], end=r[1])
+def range_to_cap(start, end, name='worker', id=-1):
+  return msg_capnp.WorkerInfo.new_message(start=start, end=end, 
+                                          name=name, id=id)
 
 def msg_to_cap(s):
   return msg_capnp.Msg.new_message(msg=s)

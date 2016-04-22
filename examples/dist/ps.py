@@ -8,6 +8,8 @@ from cifar10_allcnn import ModelCifar10AllCNN
 import math
 import threading
 
+import db
+
 class ReduceGrads:
     def __init__(self, total_worker):
         self.grad_array = []
@@ -72,7 +74,10 @@ class WorkerStub:
         self.end   = self.start + each_total
         self.id = id
         
-        return self.cap.loadData(info=range_to_cap((self.start, self.end)))
+        return self.cap.loadData(info=range_to_cap(self.start, self.end, self.name, self.id))
+
+    def end_run(self):
+        return self.cap.endRun()
         
     # TODO: use call back 'then'
     def run_step_sync(self, var_cap):
@@ -84,14 +89,25 @@ def worker_callback(result):
     reducer.reduce(grad_array)
     print "%f: %d Grads Recv" % (time.time(), 0)
 
+
+worker_addr_list = [("localhost", 60000, "Alice")]
+db_server_host = 'choufong.ucsd.edu'
+
 DATA_SIZE = 300
-
-worker_addr_list = [("localhost", 60000, "Myself")]
-
 DATA_PER_WORKER = DATA_SIZE / len(worker_addr_list)
 MINIBATCH_PER_WORKER = 128
-
 NR_BATCH = int( math.ceil( float(DATA_PER_WORKER) / MINIBATCH_PER_WORKER) )
+
+# influx db
+db_server = db.DBServer()
+# make sure influx db server is on
+#db_server.start_service()
+#print 'InfluxDB: server started'
+
+db_client = db.DBClient(db_server_host, 8086, 'default', 'ps', 999)
+print 'InfluxDB: client connected'
+# clear old data
+db_client.clear_data()
 
 # build model
 #model = ModelMnist()
@@ -120,10 +136,11 @@ for worker_addr in worker_addr_list:
 for worker in worker_list:
     worker.connect()
 
-model.model.set_worker(worker_list, reducer)
+model.model.set_dist(worker_list, reducer, db_client)
 
-# run fit
+# load data
 print "%f: Load data at workers" % time.time()
+db_client.commit_cache('load', 's')
 promises = []
 for id, worker in enumerate(worker_list):
     promises.append(worker.load_data(worker_nr, id))
@@ -131,6 +148,21 @@ for id, worker in enumerate(worker_list):
 for p in promises:
     p.wait()
 print "%f: Load data done" % time.time() 
+db_client.commit_cache('load', 'e')
 
+# fit
 model.fit_ps()
-model.eval()
+
+db_client.push_data()
+
+# shut down workers
+promises = []
+for worker in worker_list:
+    promises.append( worker.end_run() )
+
+for p in promises:
+    p.wait()
+
+print "%f: Workers down" % time.time() 
+ 
+#model.eval()
